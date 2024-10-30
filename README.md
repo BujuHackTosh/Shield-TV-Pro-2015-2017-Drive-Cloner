@@ -2,7 +2,7 @@
 
 # Disk Clone Utility
 
-The Disk Clone Utility is a Python-based application designed to simplify the process of cloning disk partitions. It allows users to create a binary dump of disk partitions and write them to a new disk while providing visual feedback and logging capabilities.
+The Disk Clone Utility is a Python-based application designed to simplify the process of cloning disk partitions on the NVIDIA Shield TV Pro 500GB (2015/2017) to any disk size. It allows users to create a binary dump of disk partitions and write them to a new disk while providing visual feedback and logging capabilities.
 
 ## Features
 
