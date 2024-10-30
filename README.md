@@ -36,7 +36,7 @@ Run the application:
 
 
 
-Usage
+## Usage
 
 1.Click the "List Disks" button to view all available disks.
 
@@ -51,7 +51,7 @@ Usage
 6.Use the "Cancel" button to stop any ongoing operation.
 
 
-Contributing
+## Contributing
 
 If you would like to contribute to the project, feel free to fork the repository and submit a pull request. 
 Any improvements, bug fixes, or suggestions are welcome.
