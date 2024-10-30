@@ -32,7 +32,7 @@ The Disk Clone Utility is a Python-based application designed to simplify the pr
 Ensure you have Python installed on your system.
 Run the application:
 
-python disk_clone_utility.py
+      sudo python3 disk_clone_utility.py
 
 
 
