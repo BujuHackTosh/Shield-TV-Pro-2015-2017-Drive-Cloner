@@ -1,198 +1,194 @@
+import tkinter as tk
+from tkinter import messagebox, filedialog, ttk
 import os
-import subprocess
 import struct
 import zlib
-from tkinter import *
-from tkinter import messagebox, filedialog, ttk
-import threading
+from subprocess import check_output, Popen, PIPE
 
-class SATVCloneApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Shield TV Pro 2015/2017 Drive Cloner")
-        self.root.geometry("600x550")
+def list_disks():
+    """List all disks available on the system and display them in the disk list."""
+    output = check_output(["lsblk", "-o", "NAME,SIZE,TYPE", "-d"]).decode()
+    disks = [line for line in output.splitlines() if "disk" in line]
+    disk_list.delete(0, tk.END)
+    for disk in disks:
+        disk_list.insert(tk.END, disk)
 
-        # Drive Selection Frame
-        self.drive_label = Label(self.root, text="Select Drive to Work On:")
-        self.drive_label.pack(pady=10)
+def run_dd(command, progress_label, max_blocks, update_progress):
+    """Run dd command and update progress."""
+    process = Popen(command, shell=True, stdout=PIPE, stderr=PIPE)
+    for line in process.stderr:
+        if b"records in" in line:
+            progress_label.set(line.decode("utf-8").strip())
+            # Update the progress bar
+            progress_data = line.decode("utf-8").split()
+            blocks_copied = int(progress_data[0]) if progress_data[0].isdigit() else 0
+            update_progress(blocks_copied, max_blocks)
 
-        self.drive_button = Button(self.root, text="List Drives", command=self.list_drives)
-        self.drive_button.pack(pady=5)
+    process.wait()
+    return process.returncode == 0
 
-        self.drive_listbox = Listbox(self.root, width=50, height=5)
-        self.drive_listbox.pack(pady=5)
+def dump_partitions():
+    """Dump partitions from the selected drive."""
+    selected_disk = disk_list.get(tk.ACTIVE).split()[0]
+    if not selected_disk:
+        messagebox.showerror("Error", "No drive selected.")
+        return
 
-        # Progress bars
-        self.partition_progress = ttk.Progressbar(self.root, orient=HORIZONTAL, length=400, mode='determinate')
-        self.partition_progress.pack(pady=10)
-        
-        self.gpt_progress = ttk.Progressbar(self.root, orient=HORIZONTAL, length=400, mode='determinate')
-        self.gpt_progress.pack(pady=10)
+    # Set the maximum for the progress bar for the dump process
+    max_blocks_first = 6899870
+    max_blocks_last = 10
 
-        # Actions Frame
-        self.dump_button = Button(self.root, text="Dump Partitions", command=self.dump_partitions)
-        self.dump_button.pack(pady=5)
+    # Dump first 6,899,870 blocks
+    progress_label.set("Dumping first part...")
+    update_progress_bar(0, max_blocks_first)
+    if run_dd(f"dd if=/dev/{selected_disk} of=firstpart.bin bs=512 count=6899870", progress_label, max_blocks_first, update_progress_bar):
+        messagebox.showinfo("Success", "First part dumped successfully.")
+    else:
+        messagebox.showerror("Error", "Failed to dump the first part.")
+        return
 
-        self.insert_drive_label = Label(self.root, text="Insert new drive and click 'List Drives' to select the new drive:")
-        self.insert_drive_label.pack(pady=10)
-        self.insert_drive_label.config(state=DISABLED)  # Initially disabled
+    # Dump last 5120 bytes (10 blocks of 512 bytes each)
+    progress_label.set("Dumping last part...")
+    update_progress_bar(0, max_blocks_last)
+    total_sectors = int(check_output(["fdisk", "-l", f"/dev/{selected_disk}"]).decode().split()[-1])
+    if run_dd(f"dd if=/dev/{selected_disk} of=lastpart.bin bs=512 skip={total_sectors - 10} count=10", progress_label, max_blocks_last, update_progress_bar):
+        messagebox.showinfo("Success", "Last part dumped successfully.")
+    else:
+        messagebox.showerror("Error", "Failed to dump the last part.")
+        return
 
-        self.select_new_drive_button = Button(self.root, text="Select New Drive for Dumping", command=self.select_new_drive)
-        self.select_new_drive_button.pack(pady=5)
-        self.select_new_drive_button.config(state=DISABLED)  # Initially disabled
+    progress_bar["value"] = 0  # Reset the progress bar
+    dump_button.config(state=tk.DISABLED)
+    select_clone_button.config(state=tk.NORMAL)
 
-        self.disk_size_label = Label(self.root, text="Disk Size (in bytes):")
-        self.disk_size_label.pack(pady=10)
-        self.disk_size_entry = Entry(self.root, state='readonly')  # Set to read-only initially
-        self.disk_size_entry.pack(pady=5)
+def get_disk_info(disk_path):
+    """Get sector count and sector size from the disk using fdisk command."""
+    output = check_output(["fdisk", "-l", disk_path]).decode()
+    sectors = int([line for line in output.splitlines() if "sectors" in line][0].split()[7])
+    sector_size = int([line for line in output.splitlines() if "bytes" in line][0].split()[8])
+    return sectors, sector_size
 
-        self.modify_button = Button(self.root, text="Modify GPT Header", command=self.modify_gpt_header)
-        self.modify_button.pack(pady=5)
-        self.modify_button.config(state=DISABLED)  # Initially disabled
+def calculate_last_usable_lba(sectors):
+    """Calculate the last usable LBA as (sectors - 34)."""
+    return sectors - 34
 
-        self.write_button = Button(self.root, text="Write to New Drive", command=self.write_both_parts_to_new_drive)
-        self.write_button.pack(pady=5)
-        self.write_button.config(state=DISABLED)  # Initially disabled
+def convert_to_reverse_hex(value):
+    """Convert integer value to a reversed hexadecimal byte sequence."""
+    hex_value = struct.pack("<I", value)  # Little-endian unsigned int
+    return hex_value
 
-        self.total_blocks = 0
-        self.drive = ""
-        self.new_drive = ""
+def update_lastpart_bin(lastpart_path, last_usable_lba):
+    """Update the Last Usable LBA in lastpart.bin."""
+    with open(lastpart_path, "rb+") as f:
+        f.seek(0xFA8)
+        f.write(convert_to_reverse_hex(last_usable_lba))
 
-    def list_drives(self):
-        """List available drives using fdisk -l."""
-        try:
-            result = subprocess.run(['fdisk', '-l'], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            drives_output = result.stdout.decode('utf-8')
+def calculate_crc32(data):
+    """Calculate CRC-32 checksum."""
+    return struct.pack("<I", zlib.crc32(data) & 0xFFFFFFFF)
 
-            # Parse drive names
-            self.drive_listbox.delete(0, END)  # Clear previous entries
-            for line in drives_output.splitlines():
-                if line.startswith("/dev/"):
-                    self.drive_listbox.insert(END, line)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to list drives: {e}")
+def update_partition_array_crc(lastpart_path):
+    """Calculate and update the CRC-32 of the partition array in lastpart.bin."""
+    with open(lastpart_path, "rb+") as f:
+        f.seek(0)  # Start at beginning of file
+        partition_array = f.read(0x100)  # Read up to offset 0xFF
+        crc32_value = calculate_crc32(partition_array)
 
-    def dump_partitions(self):
-        """Dump the first 6,899,870 blocks and the last 5120 bytes of the drive with progress."""
-        def run_dump():
-            try:
-                selected_drive = self.drive_listbox.get(ACTIVE).split()[0]
-                self.drive = selected_drive
+        # Write the CRC-32 to GPT header at offset 0x1258
+        f.seek(0x1258)
+        f.write(crc32_value[::-1])  # Reverse bytes for big-endian storage
 
-                # Estimated block count for the progress bar
-                total_blocks = 6899870
+def update_gpt_header(lastpart_path, sectors):
+    """Update the GPT header values in lastpart.bin to reflect the new disk layout."""
+    with open(lastpart_path, "rb+") as f:
+        # Update positions of GPT header and backup
+        gpt_header_position = 1
+        backup_header_position = sectors - 1
+        f.seek(0x1218)
+        f.write(convert_to_reverse_hex(gpt_header_position))
+        f.seek(0x1220)
+        f.write(convert_to_reverse_hex(backup_header_position))
 
-                # Dump the first 6,899,870 blocks with progress update
-                self.partition_progress["maximum"] = total_blocks
-                proc = subprocess.Popen(['dd', f'if={self.drive}', 'of=firstpart.bin', 'count=6899870', 'status=progress'], 
-                                        stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        # Update Last Usable LBA
+        last_usable_lba = calculate_last_usable_lba(sectors)
+        f.seek(0x1230)
+        f.write(convert_to_reverse_hex(last_usable_lba))
 
-                # Monitor progress from dd output
-                while proc.poll() is None:
-                    output = proc.stdout.readline().decode('utf-8')
-                    if "records in" in output:
-                        completed_blocks = int(output.split()[0])
-                        self.partition_progress["value"] = completed_blocks
-                    self.root.update_idletasks()
+        # Update Starting LBA of partition array entries
+        starting_lba = 2
+        f.seek(0x1248)
+        f.write(convert_to_reverse_hex(starting_lba))
 
-                # Dump the last 5120 bytes
-                subprocess.run(['dd', f'if={self.drive}', 'of=lastpart.bin', 'bs=512', 'skip=976773158'], check=True)
+def update_gpt_header_crc(lastpart_path):
+    """Calculate and update the CRC-32 of the GPT header itself."""
+    with open(lastpart_path, "rb+") as f:
+        # Clear the existing CRC-32 at offset 0x1210
+        f.seek(0x1210)
+        f.write(b"\x00\x00\x00\x00")
 
-                messagebox.showinfo("Success", "Partitions dumped successfully.")
-                self.insert_drive_label.config(state=NORMAL)
-                self.select_new_drive_button.config(state=NORMAL)
-            except Exception as e:
-                messagebox.showerror("Error", f"Failed to dump partitions: {e}")
+        # Calculate CRC-32 of the GPT header (from 0x1200 to last non-zero byte before zeros)
+        f.seek(0x1200)
+        gpt_header = f.read(0x5C)  # Length depends on actual header size; 0x5C in this example
+        crc32_value = calculate_crc32(gpt_header)
 
-        # Run dump in a separate thread to keep UI responsive
-        threading.Thread(target=run_dump).start()
+        # Write the CRC-32 to GPT header at offset 0x1210
+        f.seek(0x1210)
+        f.write(crc32_value)
 
-    def select_new_drive(self):
-        """Select a new drive where the modified files will be dumped."""
-        try:
-            # Select the new drive from the listbox
-            selected_new_drive = self.drive_listbox.get(ACTIVE).split()[0]
-            self.new_drive = selected_new_drive
+def modify_gpt_header():
+    """Modify GPT header for the new disk size."""
+    new_disk = disk_list.get(tk.ACTIVE).split()[0]
+    if not new_disk:
+        messagebox.showerror("Error", "No new drive selected.")
+        return
 
-            # Extract the size of the new drive
-            result = subprocess.run(['fdisk', '-l', self.new_drive], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            fdisk_output = result.stdout.decode('utf-8')
+    sectors, sector_size = get_disk_info(f"/dev/{new_disk}")
+    update_lastpart_bin("lastpart.bin", calculate_last_usable_lba(sectors))
+    update_partition_array_crc("lastpart.bin")
+    update_gpt_header("lastpart.bin", sectors)
+    update_gpt_header_crc("lastpart.bin")
 
-            for line in fdisk_output.splitlines():
-                if "Disk" in line and "bytes" in line:
-                    disk_size = int(line.split()[4])
-                    self.disk_size_entry.config(state=NORMAL)
-                    self.disk_size_entry.delete(0, END)
-                    self.disk_size_entry.insert(0, str(disk_size))
-                    self.disk_size_entry.config(state='readonly')
-                    break
+    messagebox.showinfo("Success", "GPT header modified for new disk.")
 
-            self.modify_button.config(state=NORMAL)
-            self.write_button.config(state=NORMAL)
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to select new drive: {e}")
+def write_partition_files():
+    """Write firstpart.bin and modified lastpart.bin to the new drive."""
+    new_disk = disk_list.get(tk.ACTIVE).split()[0]
+    if not new_disk:
+        messagebox.showerror("Error", "No new drive selected.")
+        return
 
-    def modify_gpt_header(self):
-        """Modify GPT header and CRC32 values."""
-        try:
-            new_disk_size_str = self.disk_size_entry.get()
+    max_blocks_first = 6899870
+    max_blocks_last = 10
 
-            if not new_disk_size_str.isdigit():
-                messagebox.showerror("Invalid Input", "Please enter a valid disk size in bytes.")
-                return
+    # Write firstpart.bin
+    progress_label.set("Writing first part...")
+    update_progress_bar(0, max_blocks_first)
+    if run_dd(f"dd if=firstpart.bin of=/dev/{new_disk} bs=512 seek=0", progress_label, max_blocks_first, update_progress_bar):
+        messagebox.showinfo("Success", "First part written successfully.")
+    else:
+        messagebox.showerror("Error", "Failed to write the first part.")
+        return
 
-            new_disk_size = int(new_disk_size_str)
-            self.total_blocks = new_disk_size // 512
+    # Write lastpart.bin
+    progress_label.set("Writing last part...")
+    update_progress_bar(0, max_blocks_last)
+    total_sectors = int(check_output(["fdisk", "-l", f"/dev/{new_disk}"]).decode().split()[-1])
+    if run_dd(f"dd if=lastpart.bin of=/dev/{new_disk} bs=512 seek={total_sectors - 10}", progress_label, max_blocks_last, update_progress_bar):
+        messagebox.showinfo("Success", "Last part written successfully.")
+    else:
+        messagebox.showerror("Error", "Failed to write the last part.")
+        return
 
-            with open('lastpart.bin', 'rb+') as f:
-                data = f.read()
-                last_lba_offset = 0xFA8
-                last_lba_value = struct.pack('<I', self.total_blocks)
-                f.seek(last_lba_offset)
-                f.write(last_lba_value)
+    messagebox.showinfo("Success", "Cloning complete.")
 
-                crc32_offset = 0x1258
-                partition_data = data[:0xFF0]
-                crc32_checksum = struct.pack('<I', zlib.crc32(partition_data))
-                f.seek(crc32_offset)
-                f.write(crc32_checksum)
+def update_progress_bar(value, maximum):
+    """Update progress bar."""
+    progress_bar["maximum"] = maximum
+    progress_bar["value"] = value
 
-            messagebox.showinfo("Success", "GPT header modified successfully.")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to modify GPT header: {e}")
+# GUI setup
+root = tk.Tk()
+root.title("Disk Clone Utility")
 
-    def write_both_parts_to_new_drive(self):
-        """Write the firstpart.bin and modified lastpart.bin to the new drive with progress."""
-        def run_write():
-            try:
-                # Write firstpart.bin (6,899,870 blocks) to the new drive
-                total_firstpart_blocks = 6899870  # Blocks to write from firstpart.bin
-                self.partition_progress["maximum"] = total_firstpart_blocks
-
-                proc1 = subprocess.Popen(['dd', 'if=firstpart.bin', f'of={self.new_drive}', 'bs=512', 'count=6899870', 'status=progress'],
-                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-
-                # Monitor progress for firstpart.bin write
-                while proc1.poll() is None:
-                    output = proc1.stdout.readline().decode('utf-8')
-                    if "records in" in output:
-                        completed_blocks = int(output.split()[0])
-                        self.partition_progress["value"] = completed_blocks
-                    self.root.update_idletasks()
-
-                # Write lastpart.bin (5120 bytes) to the new drive
-                last_block = self.total_blocks - 10
-                total_size = 5120  # Bytes to write from lastpart.bin
-
-                self.gpt_progress["maximum"] = total_size
-
-                proc2 = subprocess.Popen(['dd', 'if=lastpart.bin', f'of={self.new_drive}', 'bs=512', f'seek={last_block}', 'status=progress'], 
-                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-
-                # Monitor progress for lastpart.bin write
-                while proc2.poll() is None:
-                    output = proc2.stdout.readline().decode('utf-8')
-                    if "bytes" in output and "written" in output:
-                        written_bytes = int(output.split()[0])
-                        self.gpt_progress["value"] = written_bytes
-                    self.root.update_idletasks()
+# List disks
+disk_list_frame
