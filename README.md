@@ -38,12 +38,19 @@ Run the application:
 
 Usage
 
-Click the "List Disks" button to view all available disks.
-Select the disk you want to clone from the list.
-Click "Dump Partitions" to start the dumping process.
-Confirm the action when prompted, as it may lead to data loss.
-Monitor the progress through the progress bar and percentage display.
-Use the "Cancel" button to stop any ongoing operation.
+1.Click the "List Disks" button to view all available disks.
+
+2.Select the disk you want to clone from the list.
+
+3.Click "Dump Partitions" to start the dumping process.
+
+4.Confirm the action when prompted, as it may lead to data loss.
+
+5.Monitor the progress through the progress bar and percentage display.
+
+6.Use the "Cancel" button to stop any ongoing operation.
+
+
 Contributing
 
 If you would like to contribute to the project, feel free to fork the repository and submit a pull request. 
