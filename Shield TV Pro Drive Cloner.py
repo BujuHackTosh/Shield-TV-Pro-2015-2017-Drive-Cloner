@@ -43,6 +43,61 @@ def confirm_action(action_name, action_func):
     if response:
         action_func()
 
+def modify_lastpart(bin_file, new_disk_size):
+    """Modify the lastpart.bin file according to the provided specifications."""
+    # Calculate the last LBA based on the new disk size
+    last_lba = (new_disk_size // 512) - 1  # LBA is based on 512-byte blocks
+
+    # Open the lastpart.bin file for reading and writing
+    with open(bin_file, 'r+b') as f:
+        # Read the whole file into memory
+        data = f.read()
+
+        # Step 1: Update Last LBA (offset 0xFA8)
+        last_lba_offset = 0xFA8
+        last_lba_bytes = struct.pack('<I', last_lba)  # Pack as little-endian
+        data = data[:last_lba_offset] + last_lba_bytes + data[last_lba_offset + 4:]
+
+        # Step 2: Calculate CRC32 for the partition array
+        partition_array_offset = 0x0  # Adjust as necessary
+        partition_array_length = 0xFF0  # Adjust as necessary
+        crc_data = data[partition_array_offset:partition_array_offset + partition_array_length]
+        crc32_value = zlib.crc32(crc_data) & 0xffffffff  # Ensure it is unsigned
+        crc_bytes = struct.pack('<I', crc32_value)
+
+        # Step 3: Update CRC32 in the GPT header (offset 0x1258)
+        crc_offset = 0x1258
+        data = data[:crc_offset] + crc_bytes[::-1] + data[crc_offset + 4:]
+
+        # Step 4: Update other GPT header values (example values, adjust as necessary)
+        gpt_header_offset = 0x1218
+        data = data[:gpt_header_offset] + struct.pack('<I', last_lba)[::-1] + data[gpt_header_offset + 4:]
+
+        # Update Last Usable LBA and Starting LBA of array of partition entries (dummy values used here)
+        last_usable_lba_offset = 0x1230  # Adjust this offset as necessary
+        starting_lba_offset = 0x1248  # Adjust this offset as necessary
+        data = data[:last_usable_lba_offset] + struct.pack('<I', last_lba)[::-1] + data[last_usable_lba_offset + 4:]
+        data = data[:starting_lba_offset] + struct.pack('<I', 2)[::-1] + data[starting_lba_offset + 4:]
+
+        # Final CRC32 of the GPT header
+        gpt_crc_offset = 0x1210
+        data = data[:gpt_crc_offset] + b'\x00\x00\x00\x00' + data[gpt_crc_offset + 4:]
+        new_gpt_crc = zlib.crc32(data[gpt_header_offset:gpt_crc_offset]) & 0xffffffff
+        data = data[:gpt_crc_offset] + struct.pack('<I', new_gpt_crc)[::-1] + data[gpt_crc_offset + 4:]
+
+        # Write the modified data back to the file
+        f.seek(0)
+        f.write(data)
+
+def write_lastpart_to_disk(bin_file, target_disk, total_blocks):
+    """Write the modified lastpart.bin to the specified location on the new disk."""
+    lastpart_blocks = 10  # lastpart.bin size in blocks (10 blocks of 512 bytes)
+    seek_position = total_blocks - lastpart_blocks  # Calculate seek position
+    command = f"dd if={bin_file} of={target_disk} bs=512 seek={seek_position}"
+    
+    # Run the dd command
+    os.system(command)
+
 def dump_partitions():
     """Dump partitions from the selected drive."""
     selected_disk = disk_list.get(tk.ACTIVE).split()[0]
@@ -75,6 +130,8 @@ def dump_partitions():
         total_sectors = int(check_output(["fdisk", "-l", f"/dev/{selected_disk}"]).decode().split()[-1])
         if run_dd(f"dd if=/dev/{selected_disk} of=lastpart.bin bs=512 skip={total_sectors - 10} count=10", progress_label, max_blocks_last, update_progress_bar, stop_event):
             log_message("Last part dumped successfully.")
+            # Modify lastpart.bin after dumping
+            modify_lastpart('lastpart.bin', total_sectors * 512)
         else:
             log_message("Failed to dump the last part or cancelled.")
             dump_button.config(state=tk.NORMAL)
@@ -128,31 +185,4 @@ list_button.grid(row=0, column=1, padx=10, pady=5)
 
 # Progress bar, percentage label, and label for progress text
 progress_bar = ttk.Progressbar(progress_frame, orient=tk.HORIZONTAL, length=400, mode='determinate')
-progress_bar.grid(row=0, column=0, padx=10, pady=5)
-
-progress_percentage_label = tk.Label(progress_frame, text="0%")
-progress_percentage_label.grid(row=0, column=1, padx=10, pady=5)
-
-progress_label_widget = tk.Label(progress_frame, textvariable=progress_label)
-progress_label_widget.grid(row=1, column=0, padx=10, pady=5)
-
-# Log window
-log_text = tk.Text(log_frame, height=10, width=60, state=tk.DISABLED)
-log_text.grid(row=0, column=0, padx=10, pady=5)
-
-# Buttons
-dump_button = tk.Button(button_frame, text="Dump Partitions", command=dump_partitions)
-dump_button.grid(row=0, column=0, padx=10, pady=5)
-
-cancel_button = tk.Button(button_frame, text="Cancel", command=cancel_operation, state=tk.DISABLED)
-cancel_button.grid(row=0, column=1, padx=10, pady=5)
-
-select_clone_button = tk.Button(button_frame, text="Select Clone", state=tk.DISABLED)
-select_clone_button.grid(row=0, column=2, padx=10, pady=5)
-
-help_button = tk.Button(button_frame, text="Help", command=lambda: messagebox.showinfo("Help", "This tool helps in cloning disks. Use 'List Disks' to select disks."))
-help_button.grid(row=0, column=3, padx=10, pady=5)
-
-# Final setup
-list_disks()
-root.mainloop()
+progress_bar.grid(row=0, column=0,
